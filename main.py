@@ -15,7 +15,7 @@ def index():
 # -------------------------------------------------------------
 # ДАННЫЕ АВТОРИЗАЦИИ И ШАБЛОНЫ
 # -------------------------------------------------------------
-GOLDEN_KEY = "u578vcurj5wxi4vc0fjhcaulqn0qqb4t"
+GOLDEN_KEY = "T1j669ik62280q9ubjuellcf7wzye7ca"
 
 # ТОЧНЫЕ СЛОВА-ТРИГГЕРЫ ИЗ ТВОИХ ЛОТОВ
 TRIGGER_SIGMA = "СИГМЫ"
@@ -65,7 +65,7 @@ def get_delivery_message(description: str):
     elif TRIGGER_HYZEN in description:
         return TEXT_HYZEN
 
-    # Страховка на случай смены регистра (например, если в заказе буквы стали строчными)
+    # Страховка на случай смены регистра букв
     desc_upper = description.upper()
     if "СИГМЫ" in desc_upper or "SIGMA" in desc_upper:
         return TEXT_SIGMA
