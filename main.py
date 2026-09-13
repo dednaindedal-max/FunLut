@@ -1,3 +1,5 @@
+import re
+import requests
 import os
 import time
 import threading
@@ -121,9 +123,45 @@ def start_bot_loop():
             print(f"[x] Сбой: {err}. Переподключение через 15 секунд...")
             time.sleep(15)
 
+
+def start_auto_raise():
+    time.sleep(20)
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "X-Requested-With": "XMLHttpRequest"
+    }
+    cookies = {"golden_key": GOLDEN_KEY}
+
+    while True:
+        try:
+            print("[↑] Проверка лотов для поднятия...")
+            res = requests.get("https://funpay.com/", cookies=cookies, headers=headers)
+            user_m = re.search(r'href="(/users/\d+/)"', res.text)
+            if user_m:
+                prof_res = requests.get("https://funpay.com" + user_m.group(1), cookies=cookies, headers=headers)
+                categories = set(re.findall(r'/(lots|chips)/(\d+)/', prof_res.text))
+                for cat_type, node in categories:
+                    try:
+                        page = requests.get(f"https://funpay.com/{cat_type}/{node}/", cookies=cookies, headers=headers).text
+                        game_m = re.search(r'data-game="(\d+)"', page)
+                        payload = {"node_id": node}
+                        if game_m:
+                            payload["game_id"] = game_m.group(1)
+                        r = requests.post(f"https://funpay.com/{cat_type}/raise", headers=headers, cookies=cookies, data=payload)
+                        msg = r.json().get("msg", "Ок")
+                        print(f"[↑] Поднятие категории {cat_type} #{node}: {msg}")
+                    except Exception:
+                        pass
+                    time.sleep(2)
+        except Exception as e:
+            print(f"[x] Ошибка автоподнятия: {e}")
+
+        time.sleep(3600)
+
 if __name__ == '__main__':
     bot_thread = threading.Thread(target=start_bot_loop, daemon=True)
     bot_thread.start()
+    threading.Thread(target=start_auto_raise, daemon=True).start()
 
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
