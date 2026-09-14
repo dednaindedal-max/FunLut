@@ -20,10 +20,17 @@ GOLDEN_KEY = "t1j669ik62280q9ubjuellcf7wzye7ca"
 USER_ID    = "18024937"
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 
-TRIGGER_SIGMA  = "СИГМЫ"
-TRIGGER_ZIKO   = "RTxZIKO"
-TRIGGER_HYZEN  = "ХАЙЗЕНА"
-TRIGGER_GEMINI = "GEMINI"
+# ТРИГГЕРЫ
+TRIGGER_OPTIMIZATION = "ОПТИМИЗАЦИЯ"
+TRIGGER_SIGMA        = "СИГМЫ"
+TRIGGER_ZIKO         = "RTxZIKO"
+TRIGGER_HYZEN        = "ХАЙЗЕНА"
+TRIGGER_GEMINI       = "GEMINI"
+
+# ТЕКСТЫ ВЫДАЧИ
+TEXT_OPTIMIZATION = """✴ Спасибо за покупку!
+Ссылка на премиум оптимизацию: https://docs.google.com/document/d/1MG8WVM1rfODUX50DRVJd2wZ8jER7cfsxE6vS_aaomtM/edit?usp=sharing
+✴ Настройте, перезагрузите ПК и оставьте отзыв 5★!"""
 
 TEXT_SIGMA = """Спасибо за покупку! 🎯 
 Актуальный код чувствительности SIGMA:
@@ -73,9 +80,17 @@ def get_delivery_message(description: str):
         return "SKIP_BUILTIN"
 
     desc_upper = description.upper()
+
+    # Оптимизация ПК
+    if TRIGGER_OPTIMIZATION in desc_upper or "OPTIMIZATION" in desc_upper:
+        return TEXT_OPTIMIZATION
+
+    # Google Gemini
     if TRIGGER_GEMINI in desc_upper:
         return TEXT_GEMINI
-    elif TRIGGER_SIGMA in description or "SIGMA" in desc_upper:
+
+    # Metro Royale
+    if TRIGGER_SIGMA in description or "SIGMA" in desc_upper:
         return TEXT_SIGMA
     elif TRIGGER_ZIKO in description or "RTXZIKO" in desc_upper or "ЗИКО" in desc_upper:
         return TEXT_ZIKO
@@ -96,7 +111,6 @@ def start_bot_loop():
         "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7"
     }
 
-    # Шаг 1. Загрузка существующих заказов, чтобы не трогать старых покупателей
     print("[+] Подключение к FunPay (Автовыдача)...", flush=True)
     try:
         res = session.get("https://funpay.com/orders/trade", headers=headers, timeout=15)
@@ -107,11 +121,10 @@ def start_bot_loop():
                 processed_orders.add(m.group(1))
         print(f"[✓] Успешно! Загружено {len(processed_orders)} прошлых заказов. Бот слушает новые оплаты!", flush=True)
     except Exception as e:
-        print(f"[x] Ошибка при первой синхронизации заказов: {e}", flush=True)
+        print(f"[x] Ошибка при первой синхронизации: {e}", flush=True)
 
     account = Account(GOLDEN_KEY, user_agent=USER_AGENT)
 
-    # Шаг 2. Непрерывный опрос новых оплаченных заказов каждые 6 секунд
     while True:
         try:
             res = session.get("https://funpay.com/orders/trade", headers=headers, timeout=15)
@@ -139,12 +152,12 @@ def start_bot_loop():
                     delivery_text = get_delivery_message(order_desc)
 
                     if delivery_text == "SKIP_BUILTIN":
-                        print(f"[-] Заказ #{order_id} пропущен (встроенная автовыдача FunPay).", flush=True)
+                        print(f"[-] Заказ #{order_id} пропущен (встроенная выдача).", flush=True)
                         processed_orders.add(order_id)
                         continue
 
                     if not delivery_text:
-                        print(f"[-] Для заказа #{order_id} нет подходящего триггера: {order_desc}", flush=True)
+                        print(f"[-] Для заказа #{order_id} нет триггера: {order_desc}", flush=True)
                         processed_orders.add(order_id)
                         continue
 
@@ -152,9 +165,9 @@ def start_bot_loop():
                         full_order = account.get_order(order_id)
                         account.send_message(full_order.chat_id, delivery_text)
                         processed_orders.add(order_id)
-                        print(f"[✓] Товар успешно отправлен в чат по заказу #{order_id}!", flush=True)
+                        print(f"[✓] Товар успешно выдан по заказу #{order_id}!", flush=True)
                     except Exception as send_err:
-                        print(f"[x] Ошибка отправки сообщения #{order_id}: {send_err}", flush=True)
+                        print(f"[x] Ошибка отправки #{order_id}: {send_err}", flush=True)
 
                 elif any(s in status_text for s in ["закрыт", "отменен", "возврат"]):
                     processed_orders.add(order_id)
@@ -165,7 +178,7 @@ def start_bot_loop():
         time.sleep(6)
 
 # -------------------------------------------------------------
-# АВТОПОДНЯТИЕ ЛОТОВ (КАЖДЫЕ 30 МИНУТ)
+# АВТОПОДНЯТИЕ ЛОТОВ (КАЖДЫЕ 30 МИНУТ ПО ВСЕМ КАТЕГОРИЯМ)
 # -------------------------------------------------------------
 def start_auto_raise():
     time.sleep(10)
@@ -178,7 +191,7 @@ def start_auto_raise():
 
     while True:
         try:
-            print("[↑] Проверка лотов для поднятия...", flush=True)
+            print("[↑] Проверка всех категорий для поднятия...", flush=True)
             prof_res = session.get(f"https://funpay.com/users/{USER_ID}/", headers={"User-Agent": USER_AGENT})
             categories = set(re.findall(r"/(lots|chips)/(\d+)/", prof_res.text))
 
@@ -226,7 +239,7 @@ def start_auto_raise():
                 time.sleep(3)
 
         except Exception as e:
-            print(f"[x] Ошибка в цикле автоподнятия: {e}", flush=True)
+            print(f"[x] Ошибка автоподнятия: {e}", flush=True)
 
         time.sleep(1800)
 
