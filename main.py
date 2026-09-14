@@ -88,21 +88,29 @@ def get_delivery_message(description: str):
 
     return None
 
-def fetch_valid_csrf(session):
+def get_csrf_and_phpsessid():
+    session = requests.Session()
+    session.cookies.set("golden_key", GOLDEN_KEY)
+    headers = {"User-Agent": USER_AGENT}
     try:
-        res = session.get("https://funpay.com/", headers={"User-Agent": USER_AGENT})
+        res = session.get("https://funpay.com/", headers=headers, timeout=10)
+        csrf = None
         m = re.search(r'data-app-data="([^"]+)"', res.text)
         if m:
-            app_data = json.loads(html.unescape(m.group(1)))
-            token = app_data.get("csrfToken") or app_data.get("csrf-token")
-            if token:
-                return token
-        m2 = re.search(r'["\']csrfToken["\']\s*:\s*["\']([a-f0-9]+)["\']', res.text, re.IGNORECASE)
-        if m2:
-            return m2.group(1)
+            try:
+                data = json.loads(html.unescape(m.group(1)))
+                csrf = data.get("csrfToken") or data.get("csrf-token")
+            except Exception:
+                pass
+        if not csrf:
+            m2 = re.search(r'["\']csrfToken["\']\s*:\s*["\']([a-f0-9]+)["\']', res.text, re.IGNORECASE)
+            if m2:
+                csrf = m2.group(1)
+        phpsessid = session.cookies.get("PHPSESSID")
+        return csrf, phpsessid
     except Exception as e:
-        print(f"[x] Не удалось извлечь csrf-токен: {e}", flush=True)
-    return None
+        print(f"[x] Ошибка получения CSRF: {e}", flush=True)
+        return None, None
 
 # -------------------------------------------------------------
 # АВТОПОДНЯТИЕ ЛОТОВ
@@ -179,11 +187,12 @@ def start_bot_loop():
             print("[+] Подключение к FunPay (Автовыдача)...", flush=True)
             account = Account(GOLDEN_KEY, user_agent=USER_AGENT).get()
             
-            # Принудительно передаем валидный csrfToken в сессию аккаунта
-            csrf = fetch_valid_csrf(account.session)
+            csrf, phpsessid = get_csrf_and_phpsessid()
             if csrf:
                 account.csrf_token = csrf
-                print(f"[✓] Актуальный CSRF-токен применен: {csrf[:6]}***", flush=True)
+                print(f"[✓] Актуальный CSRF применен: {csrf[:6]}***", flush=True)
+            if phpsessid:
+                account.phpsessid = phpsessid
 
             print(f"[✓] Успешно! Бот слушает заказы на аккаунте: {account.username}", flush=True)
 
