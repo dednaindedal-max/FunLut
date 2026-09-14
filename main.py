@@ -18,7 +18,7 @@ def index():
     return "FunPay Auto-Delivery & Auto-Raise Bot is active 24/7!"
 
 # -------------------------------------------------------------
-# ДАННЫЕ АККАУНТА И ШАБЛОНЫ ВЫДАЧИ
+# НАСТРОЙКИ АККАУНТА И ШАБЛОНЫ
 # -------------------------------------------------------------
 GOLDEN_KEY = "t1j669ik62280q9ubjuellcf7wzye7ca"
 USER_ID    = "18024937"
@@ -88,32 +88,19 @@ def get_delivery_message(description: str):
 
     return None
 
-def get_csrf_and_phpsessid():
-    session = requests.Session()
-    session.cookies.set("golden_key", GOLDEN_KEY)
-    headers = {"User-Agent": USER_AGENT}
+def get_csrf_token():
     try:
-        res = session.get("https://funpay.com/", headers=headers, timeout=10)
-        csrf = None
-        m = re.search(r'data-app-data="([^"]+)"', res.text)
+        r = requests.get("https://funpay.com/", headers={"User-Agent": USER_AGENT}, cookies={"golden_key": GOLDEN_KEY}, timeout=10)
+        m = re.search(r'data-app-data="([^"]+)"', r.text)
         if m:
-            try:
-                data = json.loads(html.unescape(m.group(1)))
-                csrf = data.get("csrfToken") or data.get("csrf-token")
-            except Exception:
-                pass
-        if not csrf:
-            m2 = re.search(r'["\']csrfToken["\']\s*:\s*["\']([a-f0-9]+)["\']', res.text, re.IGNORECASE)
-            if m2:
-                csrf = m2.group(1)
-        phpsessid = session.cookies.get("PHPSESSID")
-        return csrf, phpsessid
-    except Exception as e:
-        print(f"[x] Ошибка получения CSRF: {e}", flush=True)
-        return None, None
+            data = json.loads(html.unescape(m.group(1)))
+            return data.get("csrfToken") or data.get("csrf-token")
+    except Exception:
+        pass
+    return None
 
 # -------------------------------------------------------------
-# АВТОПОДНЯТИЕ ЛОТОВ
+# АВТОПОДНЯТИЕ ЛОТОВ (КАЖДЫЕ 30 МИНУТ)
 # -------------------------------------------------------------
 def start_auto_raise():
     time.sleep(10)
@@ -174,9 +161,10 @@ def start_auto_raise():
                 time.sleep(3)
 
         except Exception as e:
-            print(f"[x] Ошибка автоподнятия: {e}", flush=True)
+            print(f"[x] Ошибка в цикле автоподнятия: {e}", flush=True)
 
-        time.sleep(3600)
+        # Пауза 30 минут (1800 секунд)
+        time.sleep(1800)
 
 # -------------------------------------------------------------
 # АВТОВЫДАЧА ТОВАРОВ
@@ -187,12 +175,9 @@ def start_bot_loop():
             print("[+] Подключение к FunPay (Автовыдача)...", flush=True)
             account = Account(GOLDEN_KEY, user_agent=USER_AGENT).get()
             
-            csrf, phpsessid = get_csrf_and_phpsessid()
+            csrf = get_csrf_token()
             if csrf:
                 account.csrf_token = csrf
-                print(f"[✓] Актуальный CSRF применен: {csrf[:6]}***", flush=True)
-            if phpsessid:
-                account.phpsessid = phpsessid
 
             print(f"[✓] Успешно! Бот слушает заказы на аккаунте: {account.username}", flush=True)
 
