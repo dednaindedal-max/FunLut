@@ -1,10 +1,9 @@
 import os
 import re
 import time
-import json
-import html
 import threading
 import requests
+from bs4 import BeautifulSoup
 from flask import Flask
 from FunPayAPI.account import Account
 from FunPayAPI.updater.runner import Runner
@@ -14,12 +13,13 @@ app = Flask(__name__)
 
 @app.route('/')
 def index():
-    return "FunPay Auto-Delivery Bot is active 24/7!"
+    return "FunPay Auto-Delivery & Auto-Raise Bot is active 24/7!"
 
 # -------------------------------------------------------------
-# ДАННЫЕ АВТОРИЗАЦИИ И ШАБЛОНЫ
+# ДАННЫЕ АККАУНТА И ШАБЛОНЫ ВЫДАЧИ
 # -------------------------------------------------------------
 GOLDEN_KEY = "t1j669ik62280q9ubjuellcf7wzye7ca"
+USER_ID    = "18024937"
 
 TRIGGER_SIGMA  = "СИГМЫ"
 TRIGGER_ZIKO   = "RTxZIKO"
@@ -74,7 +74,6 @@ def get_delivery_message(description: str):
         return "SKIP_BUILTIN"
 
     desc_upper = description.upper()
-
     if TRIGGER_GEMINI in desc_upper:
         return TEXT_GEMINI
     elif TRIGGER_SIGMA in description or "SIGMA" in desc_upper:
@@ -86,95 +85,78 @@ def get_delivery_message(description: str):
 
     return None
 
+# -------------------------------------------------------------
+# АВТОПОДНЯТИЕ ЛОТОВ (ДВУХЭТАПНОЕ)
+# -------------------------------------------------------------
 def start_auto_raise():
-    time.sleep(20) # Даем время основному боту запуститься
-    
+    time.sleep(10)
+    session = requests.Session()
+    session.cookies.set("golden_key", GOLDEN_KEY)
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "X-Requested-With": "XMLHttpRequest"
+    }
+    session.headers.update(headers)
+
     while True:
         try:
-            print("[↑] Запуск проверки лотов для поднятия...")
-            session = requests.Session()
-            session.cookies.set("golden_key", GOLDEN_KEY)
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/122.0.0.0",
-                "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
-            }
-            session.headers.update(headers)
-
-            # 1. Загружаем главную страницу
-            res = session.get("https://funpay.com/")
-            
-            # 2. Ищем скрытый csrf_token (защита FunPay от ботов)
-            csrf_token = None
-            app_data_m = re.search(r'data-app-data="([^"]+)"', res.text)
-            if app_data_m:
-                try:
-                    app_data = json.loads(html.unescape(app_data_m.group(1)))
-                    csrf_token = app_data.get("csrfToken")
-                except:
-                    pass
-                    
-            if not csrf_token:
-                fallback_m = re.search(r'name="csrf_token"\s+value="([^"]+)"', res.text)
-                if fallback_m:
-                    csrf_token = fallback_m.group(1)
-
-            # 3. Ищем ссылку на свой профиль
-            user_m = re.search(r'href="(/users/\d+/)"', res.text)
-
-            if not user_m or not csrf_token:
-                print("[x] Не удалось найти профиль или csrf_token. Пробуем позже...")
-                time.sleep(300)
-                continue
-
-            # 4. Идем в профиль, собираем категории
-            prof_res = session.get("https://funpay.com" + user_m.group(1))
-            categories = set(re.findall(r'/(lots|chips)/(\d+)/', prof_res.text))
-
-            if not categories:
-                print("[-] Категории для поднятия не найдены.")
-
-            # 5. Поднимаем категории
-            raise_headers = headers.copy()
-            raise_headers["X-Requested-With"] = "XMLHttpRequest"
+            print("[↑] Проверка лотов для поднятия...", flush=True)
+            prof_res = session.get(f"https://funpay.com/users/{USER_ID}/")
+            categories = set(re.findall(r"/(lots|chips)/(\d+)/", prof_res.text))
 
             for cat_type, node in categories:
                 try:
-                    page = session.get(f"https://funpay.com/{cat_type}/{node}/").text
-                    game_m = re.search(r'data-game="(\d+)"', page)
+                    # Шаг 1: Запрашиваем окно с категориями
+                    r1 = session.post(f"https://funpay.com/{cat_type}/raise", data={"node_id": node})
+                    res_json = r1.json()
+
+                    # Если модалки нет, выводим ответ (например, кулдаун)
+                    if "modal" not in res_json:
+                        msg = res_json.get("msg", "Нет активных лотов")
+                        print(f"[↑] {cat_type} #{node}: {msg}", flush=True)
+                        continue
+
+                    # Шаг 2: Извлекаем game_id и все доступные чекбоксы
+                    soup = BeautifulSoup(res_json["modal"], "html.parser")
+                    raise_box = soup.find("div", class_="raise-box")
+                    if not raise_box:
+                        continue
+
+                    game_id = raise_box.get("data-game")
+                    main_node = raise_box.get("data-node", node)
+                    checkboxes = [inp.get("value") for inp in soup.find_all("input", type="checkbox") if inp.get("value")]
 
                     payload = {
-                        "node_id": node,
-                        "csrf_token": csrf_token
+                        "game_id": game_id,
+                        "node_id": main_node,
+                        "node_ids[]": checkboxes if checkboxes else [node]
                     }
-                    if game_m:
-                        payload["game_id"] = game_m.group(1)
 
-                    r = session.post(f"https://funpay.com/{cat_type}/raise", data=payload, headers=raise_headers)
-                    
-                    try:
-                        msg = r.json().get("msg", "Ок")
-                        print(f"[↑] Категория {cat_type} #{node}: {msg}")
-                    except:
-                        print(f"[↑] Категория {cat_type} #{node}: Ответ сервера {r.status_code}")
-                        
-                except Exception as e:
-                    print(f"[x] Ошибка при поднятии категории #{node}: {e}")
-                
-                time.sleep(3) # Пауза между поднятиями, чтобы не получить бан за спам
+                    # Шаг 3: Отправляем подтверждение поднятия
+                    r2 = session.post(f"https://funpay.com/{cat_type}/raise", data=payload)
+                    final_msg = r2.json().get("msg", "Запрос отправлен")
+                    print(f"[↑] {cat_type} #{node} (все разделы): {final_msg}", flush=True)
+
+                except Exception as node_err:
+                    print(f"[x] Ошибка категории #{node}: {node_err}", flush=True)
+
+                time.sleep(3)
 
         except Exception as e:
-            print(f"[x] Критическая ошибка автоподнятия: {e}")
+            print(f"[x] Ошибка в цикле автоподнятия: {e}", flush=True)
 
-        # FunPay разрешает поднимать не чаще раза в час/несколько часов. Ждем 1 час.
-        print("[↑] Ждем 1 час до следующей попытки...")
+        # Проверка каждый час
         time.sleep(3600)
 
+# -------------------------------------------------------------
+# АВТОВЫДАЧА ТОВАРОВ
+# -------------------------------------------------------------
 def start_bot_loop():
     while True:
         try:
-            print("[+] Подключение к FunPay (Автовыдача)...")
+            print("[+] Подключение к FunPay (Автовыдача)...", flush=True)
             account = Account(GOLDEN_KEY).get()
-            print(f"[✓] Успешно! Бот слушает заказы на аккаунте: {account.username}")
+            print(f"[✓] Успешно! Бот слушает заказы на аккаунте: {account.username}", flush=True)
 
             runner = Runner(account)
 
@@ -187,38 +169,35 @@ def start_bot_loop():
                 if order_id in processed_orders:
                     return
 
-                print(f"[!] Новый заказ #{order_id}: {order_desc}")
+                print(f"[!] Новый заказ #{order_id}: {order_desc}", flush=True)
                 delivery_text = get_delivery_message(order_desc)
 
                 if delivery_text == "SKIP_BUILTIN":
-                    print(f"[-] Заказ #{order_id} пропущен (работает сайт).")
+                    print(f"[-] Заказ #{order_id} пропущен (встроенная автовыдача).", flush=True)
                     processed_orders.add(order_id)
                     return
 
                 if not delivery_text:
-                    print(f"[-] Для заказа #{order_id} нет триггера.")
+                    print(f"[-] Для заказа #{order_id} нет триггера: {order_desc}", flush=True)
                     return
 
                 try:
                     full_order = account.get_order(order_id)
                     account.send_message(full_order.chat_id, delivery_text)
                     processed_orders.add(order_id)
-                    print(f"[✓] Успешно выдан товар #{order_id}!")
+                    print(f"[✓] Успешно выдан товар по заказу #{order_id}!", flush=True)
                 except Exception as send_err:
-                    print(f"[x] Ошибка отправки #{order_id}: {send_err}")
+                    print(f"[x] Ошибка отправки #{order_id}: {send_err}", flush=True)
 
             runner.run()
 
         except Exception as err:
-            print(f"[x] Сбой автовыдачи: {err}. Перезапуск через 15 сек...")
+            print(f"[x] Сбой автовыдачи: {err}. Перезапуск через 15 сек...", flush=True)
             time.sleep(15)
 
 if __name__ == '__main__':
-    bot_thread = threading.Thread(target=start_bot_loop, daemon=True)
-    bot_thread.start()
-
-    raise_thread = threading.Thread(target=start_auto_raise, daemon=True)
-    raise_thread.start()
+    threading.Thread(target=start_bot_loop, daemon=True).start()
+    threading.Thread(target=start_auto_raise, daemon=True).start()
 
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
