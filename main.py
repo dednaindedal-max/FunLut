@@ -86,56 +86,63 @@ def get_delivery_message(description: str):
     return None
 
 # -------------------------------------------------------------
-# АВТОПОДНЯТИЕ ЛОТОВ (ДВУХЭТАПНОЕ)
+# АВТОПОДНЯТИЕ ЛОТОВ (С ПРЕДВАРИТЕЛЬНЫМ ПОИСКОМ GAME_ID)
 # -------------------------------------------------------------
 def start_auto_raise():
     time.sleep(10)
     session = requests.Session()
     session.cookies.set("golden_key", GOLDEN_KEY)
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
         "X-Requested-With": "XMLHttpRequest"
     }
-    session.headers.update(headers)
 
     while True:
         try:
             print("[↑] Проверка лотов для поднятия...", flush=True)
-            prof_res = session.get(f"https://funpay.com/users/{USER_ID}/")
+            prof_res = session.get(f"https://funpay.com/users/{USER_ID}/", headers={"User-Agent": headers["User-Agent"]})
             categories = set(re.findall(r"/(lots|chips)/(\d+)/", prof_res.text))
+
+            raised_games = set()
 
             for cat_type, node in categories:
                 try:
-                    # Шаг 1: Запрашиваем окно с категориями
-                    r1 = session.post(f"https://funpay.com/{cat_type}/raise", data={"node_id": node})
+                    # 1. Заходим на страницу категории и берем точный data-game
+                    cat_page = session.get(f"https://funpay.com/{cat_type}/{node}/", headers={"User-Agent": headers["User-Agent"]}).text
+                    game_m = re.search(r'data-game="(\d+)"', cat_page)
+                    
+                    payload = {"node_id": node}
+                    if game_m:
+                        game_id = game_m.group(1)
+                        if game_id in raised_games:
+                            continue
+                        payload["game_id"] = game_id
+
+                    # 2. Отправляем запрос на открытие окна поднятия
+                    r1 = session.post(f"https://funpay.com/{cat_type}/raise", data=payload, headers=headers)
                     res_json = r1.json()
 
-                    # Если модалки нет, выводим ответ (например, кулдаун)
-                    if "modal" not in res_json:
-                        msg = res_json.get("msg", "Нет активных лотов")
-                        print(f"[↑] {cat_type} #{node}: {msg}", flush=True)
-                        continue
+                    # 3. Если есть модальное окно (Metro Royale, Прочее) — подтверждаем чекбоксы
+                    if "modal" in res_json:
+                        soup = BeautifulSoup(res_json["modal"], "html.parser")
+                        raise_box = soup.find("div", class_="raise-box")
+                        if raise_box:
+                            g_id = raise_box.get("data-game", payload.get("game_id"))
+                            main_node = raise_box.get("data-node", node)
+                            checkboxes = [inp.get("value") for inp in soup.find_all("input", type="checkbox") if inp.get("value")]
 
-                    # Шаг 2: Извлекаем game_id и все доступные чекбоксы
-                    soup = BeautifulSoup(res_json["modal"], "html.parser")
-                    raise_box = soup.find("div", class_="raise-box")
-                    if not raise_box:
-                        continue
+                            post_data = {
+                                "game_id": g_id,
+                                "node_id": main_node,
+                                "node_ids[]": checkboxes if checkboxes else [node]
+                            }
+                            r2 = session.post(f"https://funpay.com/{cat_type}/raise", data=post_data, headers=headers)
+                            res_json = r2.json()
+                            if g_id:
+                                raised_games.add(g_id)
 
-                    game_id = raise_box.get("data-game")
-                    main_node = raise_box.get("data-node", node)
-                    checkboxes = [inp.get("value") for inp in soup.find_all("input", type="checkbox") if inp.get("value")]
-
-                    payload = {
-                        "game_id": game_id,
-                        "node_id": main_node,
-                        "node_ids[]": checkboxes if checkboxes else [node]
-                    }
-
-                    # Шаг 3: Отправляем подтверждение поднятия
-                    r2 = session.post(f"https://funpay.com/{cat_type}/raise", data=payload)
-                    final_msg = r2.json().get("msg", "Запрос отправлен")
-                    print(f"[↑] {cat_type} #{node} (все разделы): {final_msg}", flush=True)
+                    msg = res_json.get("msg", "Запрос обработан")
+                    print(f"[↑] {cat_type} #{node}: {msg}", flush=True)
 
                 except Exception as node_err:
                     print(f"[x] Ошибка категории #{node}: {node_err}", flush=True)
@@ -143,9 +150,8 @@ def start_auto_raise():
                 time.sleep(3)
 
         except Exception as e:
-            print(f"[x] Ошибка в цикле автоподнятия: {e}", flush=True)
+            print(f"[x] Ошибка автоподнятия: {e}", flush=True)
 
-        # Проверка каждый час
         time.sleep(3600)
 
 # -------------------------------------------------------------
@@ -160,36 +166,34 @@ def start_bot_loop():
 
             runner = Runner(account)
 
-            @runner.listen(NewOrderEvent)
-            def on_new_order(event: NewOrderEvent):
-                order_shortcut = event.order
-                order_id = order_shortcut.id
-                order_desc = order_shortcut.description or ""
+            for event in runner.listen():
+                if isinstance(event, NewOrderEvent):
+                    order_shortcut = event.order
+                    order_id = order_shortcut.id
+                    order_desc = order_shortcut.description or ""
 
-                if order_id in processed_orders:
-                    return
+                    if order_id in processed_orders:
+                        continue
 
-                print(f"[!] Новый заказ #{order_id}: {order_desc}", flush=True)
-                delivery_text = get_delivery_message(order_desc)
+                    print(f"[!] Новый заказ #{order_id}: {order_desc}", flush=True)
+                    delivery_text = get_delivery_message(order_desc)
 
-                if delivery_text == "SKIP_BUILTIN":
-                    print(f"[-] Заказ #{order_id} пропущен (встроенная автовыдача).", flush=True)
-                    processed_orders.add(order_id)
-                    return
+                    if delivery_text == "SKIP_BUILTIN":
+                        print(f"[-] Заказ #{order_id} пропущен (встроенная автовыдача).", flush=True)
+                        processed_orders.add(order_id)
+                        continue
 
-                if not delivery_text:
-                    print(f"[-] Для заказа #{order_id} нет триггера: {order_desc}", flush=True)
-                    return
+                    if not delivery_text:
+                        print(f"[-] Для заказа #{order_id} нет триггера: {order_desc}", flush=True)
+                        continue
 
-                try:
-                    full_order = account.get_order(order_id)
-                    account.send_message(full_order.chat_id, delivery_text)
-                    processed_orders.add(order_id)
-                    print(f"[✓] Успешно выдан товар по заказу #{order_id}!", flush=True)
-                except Exception as send_err:
-                    print(f"[x] Ошибка отправки #{order_id}: {send_err}", flush=True)
-
-            runner.run()
+                    try:
+                        full_order = account.get_order(order_id)
+                        account.send_message(full_order.chat_id, delivery_text)
+                        processed_orders.add(order_id)
+                        print(f"[✓] Успешно выдан товар по заказу #{order_id}!", flush=True)
+                    except Exception as send_err:
+                        print(f"[x] Ошибка отправки #{order_id}: {send_err}", flush=True)
 
         except Exception as err:
             print(f"[x] Сбой автовыдачи: {err}. Перезапуск через 15 сек...", flush=True)
