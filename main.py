@@ -1,5 +1,7 @@
 import os
 import re
+import html
+import json
 import time
 import threading
 import requests
@@ -86,6 +88,22 @@ def get_delivery_message(description: str):
 
     return None
 
+def fetch_valid_csrf(session):
+    try:
+        res = session.get("https://funpay.com/", headers={"User-Agent": USER_AGENT})
+        m = re.search(r'data-app-data="([^"]+)"', res.text)
+        if m:
+            app_data = json.loads(html.unescape(m.group(1)))
+            token = app_data.get("csrfToken") or app_data.get("csrf-token")
+            if token:
+                return token
+        m2 = re.search(r'["\']csrfToken["\']\s*:\s*["\']([a-f0-9]+)["\']', res.text, re.IGNORECASE)
+        if m2:
+            return m2.group(1)
+    except Exception as e:
+        print(f"[x] Не удалось извлечь csrf-токен: {e}", flush=True)
+    return None
+
 # -------------------------------------------------------------
 # АВТОПОДНЯТИЕ ЛОТОВ
 # -------------------------------------------------------------
@@ -150,7 +168,6 @@ def start_auto_raise():
         except Exception as e:
             print(f"[x] Ошибка автоподнятия: {e}", flush=True)
 
-        # Проверка раз в 1 час
         time.sleep(3600)
 
 # -------------------------------------------------------------
@@ -161,11 +178,17 @@ def start_bot_loop():
         try:
             print("[+] Подключение к FunPay (Автовыдача)...", flush=True)
             account = Account(GOLDEN_KEY, user_agent=USER_AGENT).get()
+            
+            # Принудительно передаем валидный csrfToken в сессию аккаунта
+            csrf = fetch_valid_csrf(account.session)
+            if csrf:
+                account.csrf_token = csrf
+                print(f"[✓] Актуальный CSRF-токен применен: {csrf[:6]}***", flush=True)
+
             print(f"[✓] Успешно! Бот слушает заказы на аккаунте: {account.username}", flush=True)
 
             runner = Runner(account)
 
-            # requests_delay=4 дает задержку в 4 секунды между проверками (защита от спама и ошибок)
             for event in runner.listen(requests_delay=4):
                 if isinstance(event, NewOrderEvent):
                     order_shortcut = event.order
