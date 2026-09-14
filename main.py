@@ -71,22 +71,25 @@ TEXT_GEMINI = """Спасибо за покупку! 🎯
 processed_orders = set()
 processed_msg_ids = set()
 
-def get_delivery_message(description: str):
-    desc_upper = description.upper()
+def get_delivery_message(page_text: str):
+    text_upper = page_text.upper()
+    
     opt_keywords = [TRIGGER_OPTIMIZATION, "OPTIMIZATION", "FPS", "ФПС", "ПРЕМИУМ", "PREMIUM"]
-    if any(k in desc_upper for k in opt_keywords):
+    if any(k in text_upper for k in opt_keywords):
         return TEXT_OPTIMIZATION
-    if TRIGGER_GEMINI in desc_upper:
+
+    if TRIGGER_GEMINI in text_upper:
         return TEXT_GEMINI
-    if TRIGGER_SIGMA in description or "SIGMA" in desc_upper:
+
+    if TRIGGER_SIGMA in text_upper or "SIGMA" in text_upper:
         return TEXT_SIGMA
-    elif TRIGGER_ZIKO in description or "RTXZIKO" in desc_upper or "ЗИКО" in desc_upper:
+    elif TRIGGER_ZIKO in text_upper or "RTXZIKO" in text_upper or "ЗИКО" in text_upper:
         return TEXT_ZIKO
-    elif TRIGGER_HYZEN in description or "HYZEN" in desc_upper or "ХАЙЗЕН" in desc_upper:
+    elif TRIGGER_HYZEN in text_upper or "HYZEN" in text_upper or "ХАЙЗЕН" in text_upper:
         return TEXT_HYZEN
+        
     return None
 
-# Надежная отправка в чат заказа со свежим парсингом CSRF и параметров
 def send_order_delivery(session, order_id, message_text):
     order_url = f"https://funpay.com/orders/{order_id}/"
     headers = {"User-Agent": USER_AGENT, "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7"}
@@ -95,14 +98,12 @@ def send_order_delivery(session, order_id, message_text):
         html = resp.text
         soup = BeautifulSoup(html, "html.parser")
 
-        # 1. Свежий CSRF-токен прямо со страницы заказа
         csrf_m = re.search(r'csrf-token&quot;:&quot;([^&]+)&quot;', html) or re.search(r'name="csrf_token"\s+value="([^"]+)"', html)
         if not csrf_m:
             print(f"[x] #{order_id}: не найден CSRF-токен", flush=True)
             return False
         csrf_token = csrf_m.group(1)
 
-        # 2. Поиск ID чата и тега
         chat_div = soup.find("div", attrs={"data-id": True, "data-tag": True})
         if chat_div:
             node_id = int(chat_div["data-id"])
@@ -116,7 +117,6 @@ def send_order_delivery(session, order_id, message_text):
             node_id = int(m_id.group(1))
             tag = m_tag.group(1) if m_tag else ""
 
-        # 3. ID последнего сообщения
         msg_ids = re.findall(r'id="message-(\d+)"', html)
         last_msg_id = int(msg_ids[-1]) if msg_ids else 0
 
@@ -147,7 +147,7 @@ def send_order_delivery(session, order_id, message_text):
         return False
 
 # -------------------------------------------------------------
-# ОСНОВНОЙ ЦИКЛ БОТА
+# ПОТОК МОНИТОРИНГА И АВТОВЫДАЧИ
 # -------------------------------------------------------------
 def start_bot_loop():
     time.sleep(3)
@@ -155,7 +155,6 @@ def start_bot_loop():
     session.cookies.set("golden_key", GOLDEN_KEY)
     headers = {"User-Agent": USER_AGENT, "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7"}
 
-    # Синхронизация старых заказов при старте
     try:
         r = session.get("https://funpay.com/orders/trade", headers=headers, timeout=12)
         s = BeautifulSoup(r.text, "html.parser")
@@ -166,14 +165,14 @@ def start_bot_loop():
                 m = re.search(r"/orders/([A-Z0-9]+)/", it.get("href", ""))
                 if m:
                     processed_orders.add(m.group(1))
-        print(f"[✓] Архив загружен ({len(processed_orders)} заказов). Мониторинг запущен!", flush=True)
+        print(f"[✓] Инициализировано. Закрытых заказов в игноре: {len(processed_orders)}", flush=True)
     except Exception as e:
-        print(f"[x] Ошибка старта: {e}", flush=True)
+        print(f"[x] Ошибка инициализации: {e}", flush=True)
 
     bookmarks_tag = ""
 
     while True:
-        # 1. Проверка команды %1 в чатах (закладки)
+        # 1. Проверка команды %1
         try:
             bm_payload = {
                 "objects": json.dumps([{
@@ -224,17 +223,19 @@ def start_bot_loop():
                                                 author_str = author_el.get_text(strip=True) if author_el else ""
                                                 
                                                 if "Dednain" not in author_str:
-                                                    print(f"[!] Триггер %1 обнаружен в чате {node_id}!", flush=True)
+                                                    print(f"[!] Сработал %1 в чате {node_id}!", flush=True)
                                                     if send_order_delivery(session, node_id if node_id.startswith("O") else "", "На связи 🤖 Все системы работают штатно!"):
                                                         processed_msg_ids.add(mid)
         except Exception:
             pass
 
-        # 2. Мониторинг оплат и автоматическая выдача товаров
+        # 2. Проверка заказов
         try:
             r_o = session.get("https://funpay.com/orders/trade", headers=headers, timeout=8)
             s_o = BeautifulSoup(r_o.text, "html.parser")
-            for item in s_o.find_all("a", class_=re.compile(r"tc-item")):
+            order_items = s_o.find_all("a", class_=re.compile(r"tc-item"))
+
+            for item in order_items:
                 href = item.get("href", "")
                 m = re.search(r"/orders/([A-Z0-9]+)/", href)
                 if not m:
@@ -247,36 +248,35 @@ def start_bot_loop():
                 st_txt = st_div.get_text(strip=True).lower() if st_div else ""
 
                 if "оплачен" in st_txt:
-                    desc_div = item.find("div", class_=re.compile(r"tc-desc"))
-                    order_desc = desc_div.get_text(strip=True) if desc_div else ""
-                    print(f"\n[!] ОБНАРУЖЕН ОПЛАЧЕННЫЙ ЗАКАЗ #{order_id}: {order_desc}", flush=True)
+                    print(f"\n[!] 🚨 ОБНАРУЖЕН ОПЛАЧЕННЫЙ ЗАКАЗ #{order_id}. Читаем страницу заказа...", flush=True)
 
-                    # Проверяем, не выдан ли товар встроенной системой FunPay
                     order_url = f"https://funpay.com/orders/{order_id}/"
                     op = session.get(order_url, headers=headers, timeout=8).text
+                    
                     if any(x in op.lower() for x in ["товар передан покупателю", "выданный товар", "order-secrets"]):
-                        print(f"[⚡] #{order_id}: товар уже выдан FunPay автоматически.", flush=True)
+                        print(f"[⚡] #{order_id}: товар уже выдан FunPay автоматически. Пропуск.", flush=True)
                         processed_orders.add(order_id)
                         continue
 
-                    deliv_text = get_delivery_message(order_desc)
+                    deliv_text = get_delivery_message(op)
                     if not deliv_text:
-                        print(f"[-] #{order_id}: нет подходящего шаблона выдачи для товара.", flush=True)
+                        print(f"[-] #{order_id}: в тексте страницы заказа не найдены триггеры товара.", flush=True)
                         processed_orders.add(order_id)
                         continue
 
+                    print(f"[+] Найден шаблон выдачи для заказа #{order_id}!", flush=True)
                     if send_order_delivery(session, order_id, deliv_text):
                         processed_orders.add(order_id)
-                        print(f"[✓] УСПЕШНО ВЫДАН ТОВАР ПО ЗАКАЗУ #{order_id}!", flush=True)
+                        print(f"[✓] УСПЕШНО ВЫДАН ТОВАР В ЗАКАЗ #{order_id}!", flush=True)
                     else:
                         print(f"[x] Ошибка отправки товара для #{order_id}", flush=True)
 
                 elif any(s in st_txt for s in ["закрыт", "отменен", "возврат"]):
                     processed_orders.add(order_id)
-        except Exception as e:
+        except Exception:
             pass
 
-        time.sleep(3)
+        time.sleep(5)
 
 # -------------------------------------------------------------
 # АВТОПОДНЯТИЕ (РАЗ В 30 МИНУТ)
