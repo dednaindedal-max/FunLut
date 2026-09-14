@@ -69,7 +69,7 @@ TEXT_GEMINI = """Спасибо за покупку! 🎯
 После проверки подтвердите заказ и оставьте отзыв! Приятного пользования! 🔥"""
 
 processed_orders = set()
-replied_msg_ids = set()
+processed_msg_ids = set()
 
 def get_delivery_message(description: str):
     desc_upper = description.upper()
@@ -86,59 +86,51 @@ def get_delivery_message(description: str):
         return TEXT_HYZEN
     return None
 
-def send_chat_message(session, node_id, message_text: str):
+def get_csrf(session):
     try:
-        url = f"https://funpay.com/chat/?node={node_id}"
-        resp = session.get(url, headers={"User-Agent": USER_AGENT}, timeout=10)
-        html = resp.text
+        r = session.get("https://funpay.com/", headers={"User-Agent": USER_AGENT}, timeout=10)
+        m = re.search(r'csrf-token&quot;:&quot;([^&]+)&quot;', r.text) or re.search(r'name="csrf_token"\s+value="([^"]+)"', r.text)
+        return m.group(1) if m else None
+    except Exception:
+        return None
 
-        csrf_m = re.search(r'csrf-token&quot;:&quot;([^&]+)&quot;', html) or re.search(r'name="csrf_token"\s+value="([^"]+)"', html)
-        if not csrf_m:
-            return False
-        csrf = csrf_m.group(1)
-
-        tag_m = re.search(r'data-tag="([^"]+)"', html)
-        tag = tag_m.group(1) if tag_m else ""
-
-        msg_ids = re.findall(r'id="message-(\d+)"', html)
-        last_id = int(msg_ids[-1]) if msg_ids else 0
-
+def send_chat_reply(session, csrf_token, node_id, tag, last_msg_id, text):
+    try:
         payload = {
             "objects": json.dumps([{
                 "type": "chat_node",
                 "id": int(node_id),
                 "tag": tag,
-                "data": {"node": int(node_id), "last_message": last_id, "content": ""}
+                "data": {"node": int(node_id), "last_message": int(last_msg_id), "content": ""}
             }]),
             "request": json.dumps({
                 "action": "chat_message",
-                "data": {"node": int(node_id), "last_message": last_id, "content": message_text}
+                "data": {"node": int(node_id), "last_message": int(last_msg_id), "content": text}
             }),
-            "csrf_token": csrf
+            "csrf_token": csrf_token
         }
         res = session.post("https://funpay.com/runner/", data=payload, headers={
             "User-Agent": USER_AGENT,
             "X-Requested-With": "XMLHttpRequest",
-            "Referer": url
+            "Referer": "https://funpay.com/chat/"
         }, timeout=10)
         return res.status_code == 200
     except Exception as e:
-        print(f"[x] Ошибка send_chat_message ({node_id}): {e}", flush=True)
+        print(f"[x] Ошибка отправки в чат {node_id}: {e}", flush=True)
         return False
 
 # -------------------------------------------------------------
-# ЦИКЛ ОБРАБОТКИ СООБЩЕНИЙ И ЗАКАЗОВ
+# ЦИКЛ АВТОВЫДАЧИ И ЛОВЛИ %1
 # -------------------------------------------------------------
 def start_bot_loop():
     time.sleep(3)
     session = requests.Session()
     session.cookies.set("golden_key", GOLDEN_KEY)
-    headers = {
-        "User-Agent": USER_AGENT,
-        "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7"
-    }
+    headers = {"User-Agent": USER_AGENT, "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7"}
 
-    # Синхронизация истории заказов
+    csrf_token = get_csrf(session)
+
+    # Инициализация выполненных заказов
     try:
         r = session.get("https://funpay.com/orders/trade", headers=headers, timeout=12)
         s = BeautifulSoup(r.text, "html.parser")
@@ -149,56 +141,85 @@ def start_bot_loop():
                 m = re.search(r"/orders/([A-Z0-9]+)/", it.get("href", ""))
                 if m:
                     processed_orders.add(m.group(1))
-        print(f"[✓] Заказов в архиве: {len(processed_orders)}. Запуск листенера...", flush=True)
+        print(f"[✓] Архив заказов загружен ({len(processed_orders)} шт.). Бот на связи!", flush=True)
     except Exception as e:
-        print(f"[x] Старт: {e}", flush=True)
+        print(f"[x] Синхронизация заказов: {e}", flush=True)
+
+    bookmarks_tag = ""
 
     while True:
-        # 1. ЧТЕНИЕ ВХОДЯЩИХ ЧАТОВ
+        if not csrf_token:
+            csrf_token = get_csrf(session)
+
+        # 1. СЛУШАЕМ ВХОДЯЩИЕ СООБЩЕНИЯ ЧЕРЕЗ RUNNER (CHAT BOOKMARKS)
         try:
-            r_chats = session.get("https://funpay.com/chat/", headers=headers, timeout=8)
-            s_chats = BeautifulSoup(r_chats.text, "html.parser")
-            
-            # Проверяем первые 5 активных диалогов
-            for item in s_chats.find_all("a", class_=re.compile(r"chat-item"))[:5]:
-                href = item.get("href", "")
-                m_node = re.search(r"node=([a-zA-Z0-9_-]+)", href) or re.search(r"node=(\d+)", href)
-                node_id = item.get("data-id") or (m_node.group(1) if m_node else None)
-                if not node_id:
-                    continue
+            bm_payload = {
+                "objects": json.dumps([{
+                    "type": "chat_bookmarks",
+                    "id": USER_ID,
+                    "tag": bookmarks_tag,
+                    "data": False
+                }]),
+                "request": False,
+                "csrf_token": csrf_token
+            }
+            r_bm = session.post("https://funpay.com/runner/", data=bm_payload, headers={
+                "User-Agent": USER_AGENT,
+                "X-Requested-With": "XMLHttpRequest"
+            }, timeout=8)
 
-                preview = item.find(class_=re.compile(r"chat-item-text"))
-                preview_text = preview.get_text(strip=True) if preview else ""
+            if r_bm.status_code == 200:
+                data = r_bm.json()
+                for obj in data.get("objects", []):
+                    if obj.get("type") == "chat_bookmarks":
+                        bookmarks_tag = obj.get("tag", bookmarks_tag)
+                        bm_data = obj.get("data", {})
+                        if isinstance(bm_data, dict) and "html" in bm_data:
+                            soup_bm = BeautifulSoup(bm_data["html"], "html.parser")
+                            for item in soup_bm.find_all("a", class_=re.compile(r"chat-item")):
+                                text_el = item.find(class_=re.compile(r"chat-item-text"))
+                                p_text = text_el.get_text(strip=True) if text_el else ""
 
-                if "%1" in preview_text:
-                    # Заходим в диалог
-                    diag_url = f"https://funpay.com/chat/?node={node_id}"
-                    diag_page = session.get(diag_url, headers=headers, timeout=8).text
-                    diag_soup = BeautifulSoup(diag_page, "html.parser")
-                    
-                    messages = diag_soup.find_all("div", class_=re.compile(r"chat-msg-item"))
-                    if messages:
-                        last_m = messages[-1]
-                        mid = last_m.get("id", "")
-                        body = last_m.find(class_=re.compile(r"chat-msg-text"))
-                        author = last_m.find(class_=re.compile(r"chat-msg-author"))
-                        author_name = author.get_text(strip=True) if author else ""
+                                if "%1" in p_text:
+                                    node_id = item.get("data-id")
+                                    if not node_id:
+                                        m_n = re.search(r"node=(\d+)", item.get("href", ""))
+                                        node_id = m_n.group(1) if m_n else None
 
-                        if body and "%1" in body.get_text() and mid not in replied_msg_ids:
-                            # Пропускаем, если последнее сообщение написал сам бот
-                            if "Dednain" not in author_name:
-                                print(f"[!] Получена команда %1 от {author_name} (чат {node_id})", flush=True)
-                                if send_chat_message(session, node_id, "На связи 🤖 Все системы работают штатно!"):
-                                    replied_msg_ids.add(mid)
-                                    print(f"[✓] Ответ отправлен в чат {node_id}!", flush=True)
-        except Exception as e:
+                                    if node_id:
+                                        # Открываем чат того, кто написал %1
+                                        c_url = f"https://funpay.com/chat/?node={node_id}"
+                                        cp = session.get(c_url, headers=headers, timeout=8).text
+                                        soup_c = BeautifulSoup(cp, "html.parser")
+                                        
+                                        tag_m = re.search(r'data-tag="([^"]+)"', cp)
+                                        chat_tag = tag_m.group(1) if tag_m else ""
+                                        
+                                        msg_items = soup_c.find_all("div", class_=re.compile(r"chat-msg-item"))
+                                        if msg_items:
+                                            last_el = msg_items[-1]
+                                            mid = last_el.get("id", "")
+                                            msg_text_el = last_el.find(class_=re.compile(r"chat-msg-text"))
+                                            
+                                            if msg_text_el and "%1" in msg_text_el.get_text() and mid not in processed_msg_ids:
+                                                # Не отвечаем на свое же сообщение
+                                                author_el = last_el.find(class_=re.compile(r"media-user-name"))
+                                                author_str = author_el.get_text(strip=True) if author_el else ""
+                                                
+                                                if "Dednain" not in author_str:
+                                                    last_num = int(mid.replace("message-", "")) if "message-" in mid else 0
+                                                    print(f"[!] Пользователь написал %1 в чате {node_id}! Отправляем ответ...", flush=True)
+                                                    if send_chat_reply(session, csrf_token, node_id, chat_tag, last_num, "На связи 🤖 Все системы работают штатно!"):
+                                                        processed_msg_ids.add(mid)
+                                                        print(f"[✓] Ответ доставлен автору %1!", flush=True)
+        except Exception:
             pass
 
-        # 2. МОНИТОРИНГ ОПЛАТ
+        # 2. МОНИТОРИНГ ОПЛАТ И ВЫДАЧА ТОВАРОВ
         try:
-            r_ord = session.get("https://funpay.com/orders/trade", headers=headers, timeout=8)
-            s_ord = BeautifulSoup(r_ord.text, "html.parser")
-            for item in s_ord.find_all("a", class_=re.compile(r"tc-item")):
+            r_o = session.get("https://funpay.com/orders/trade", headers=headers, timeout=8)
+            s_o = BeautifulSoup(r_o.text, "html.parser")
+            for item in s_o.find_all("a", class_=re.compile(r"tc-item")):
                 href = item.get("href", "")
                 m = re.search(r"/orders/([A-Z0-9]+)/", href)
                 if not m:
@@ -213,7 +234,7 @@ def start_bot_loop():
                 if "оплачен" in st_txt:
                     desc_div = item.find("div", class_=re.compile(r"tc-desc"))
                     order_desc = desc_div.get_text(strip=True) if desc_div else ""
-                    print(f"\n[!] ОПЛАЧЕН ЗАКАЗ #{order_id}: {order_desc}", flush=True)
+                    print(f"\n[!] ОПЛАЧЕН НОВЫЙ ЗАКАЗ #{order_id}: {order_desc}", flush=True)
 
                     if "чувствительность" in order_desc.lower():
                         processed_orders.add(order_id)
@@ -222,21 +243,22 @@ def start_bot_loop():
                     order_url = f"https://funpay.com/orders/{order_id}/"
                     op = session.get(order_url, headers=headers, timeout=8).text
                     if any(x in op.lower() for x in ["товар передан покупателю", "выданный товар", "order-secrets"]):
-                        print(f"[⚡] #{order_id}: выдан встроенной системой.", flush=True)
                         processed_orders.add(order_id)
                         continue
 
-                    delivery_text = get_delivery_message(order_desc)
-                    if not delivery_text:
-                        processed_orders.add(order_id)
-                        continue
-
-                    chat_m = re.search(r'data-id="(\d+)"', op)
-                    if chat_m:
-                        c_id = chat_m.group(1)
-                        if send_chat_message(session, c_id, delivery_text):
-                            processed_orders.add(order_id)
-                            print(f"[✓] ВЫДАН ТОВАР В ЗАКАЗ #{order_id}!", flush=True)
+                    deliv_text = get_delivery_message(order_desc)
+                    if deliv_text:
+                        chat_m = re.search(r'data-id="(\d+)"', op)
+                        tag_m = re.search(r'data-tag="([^"]+)"', op)
+                        msg_m = re.findall(r'id="message-(\d+)"', op)
+                        
+                        if chat_m:
+                            cid = int(chat_m.group(1))
+                            ctag = tag_m.group(1) if tag_m else ""
+                            l_mid = int(msg_m[-1]) if msg_m else 0
+                            if send_chat_reply(session, csrf_token, cid, ctag, l_mid, deliv_text):
+                                processed_orders.add(order_id)
+                                print(f"[✓] Товар успешно отправлен в заказ #{order_id}!", flush=True)
 
                 elif any(s in st_txt for s in ["закрыт", "отменен", "возврат"]):
                     processed_orders.add(order_id)
@@ -252,10 +274,7 @@ def start_auto_raise():
     time.sleep(10)
     session = requests.Session()
     session.cookies.set("golden_key", GOLDEN_KEY)
-    headers = {
-        "User-Agent": USER_AGENT,
-        "X-Requested-With": "XMLHttpRequest"
-    }
+    headers = {"User-Agent": USER_AGENT, "X-Requested-With": "XMLHttpRequest"}
 
     while True:
         try:
