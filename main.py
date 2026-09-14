@@ -11,10 +11,10 @@ app = Flask(__name__)
 
 @app.route('/')
 def index():
-    return "FunPay Auto-Delivery & Auto-Raise Bot is active 24/7!"
+    return "FunPay Smart Auto-Delivery & Auto-Raise Bot is active 24/7!"
 
 # -------------------------------------------------------------
-# НАСТРОЙКИ АККАУНТА И ШАБЛОНЫ ВЫДАЧИ
+# НАСТРОЙКИ АККАУНТА И ШАБЛОНЫ
 # -------------------------------------------------------------
 GOLDEN_KEY = "t1j669ik62280q9ubjuellcf7wzye7ca"
 USER_ID    = "18024937"
@@ -27,7 +27,7 @@ TRIGGER_ZIKO         = "RTxZIKO"
 TRIGGER_HYZEN        = "ХАЙЗЕНА"
 TRIGGER_GEMINI       = "GEMINI"
 
-# ТЕКСТЫ ВЫДАЧИ
+# ШАБЛОНЫ ВЫДАЧИ
 TEXT_OPTIMIZATION = """✴ Спасибо за покупку!
 Ссылка на премиум оптимизацию: https://docs.google.com/document/d/1MG8WVM1rfODUX50DRVJd2wZ8jER7cfsxE6vS_aaomtM/edit?usp=sharing
 ✴ Настройте, перезагрузите ПК и оставьте отзыв 5★!"""
@@ -76,20 +76,17 @@ TEXT_GEMINI = """Спасибо за покупку! 🎯
 processed_orders = set()
 
 def get_delivery_message(description: str):
-    if "чувствительность" in description.lower():
-        return "SKIP_BUILTIN"
-
     desc_upper = description.upper()
 
-    # Оптимизация ПК
-    if TRIGGER_OPTIMIZATION in desc_upper or "OPTIMIZATION" in desc_upper:
+    # 1. Оптимизация ПК
+    if any(w in desc_upper for k in [TRIGGER_OPTIMIZATION, "OPTIMIZATION", "FPS", "ФПС", "ПРЕМИУМ"]):
         return TEXT_OPTIMIZATION
 
-    # Google Gemini
+    # 2. Google Gemini
     if TRIGGER_GEMINI in desc_upper:
         return TEXT_GEMINI
 
-    # Metro Royale
+    # 3. Сенсы Metro Royale
     if TRIGGER_SIGMA in description or "SIGMA" in desc_upper:
         return TEXT_SIGMA
     elif TRIGGER_ZIKO in description or "RTXZIKO" in desc_upper or "ЗИКО" in desc_upper:
@@ -100,7 +97,7 @@ def get_delivery_message(description: str):
     return None
 
 # -------------------------------------------------------------
-# НАДЕЖНАЯ АВТОВЫДАЧА (ПРЯМОЙ ОПРОС РАЗДЕЛА ПРОДАЖ)
+# УМНАЯ АВТОВЫДАЧА (ПРОВЕРКА ВСТРОЕННОЙ ВЫДАЧИ FUNPAY)
 # -------------------------------------------------------------
 def start_bot_loop():
     time.sleep(5)
@@ -111,7 +108,7 @@ def start_bot_loop():
         "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7"
     }
 
-    print("[+] Подключение к FunPay (Автовыдача)...", flush=True)
+    print("[+] Запуск умной автовыдачи...", flush=True)
     try:
         res = session.get("https://funpay.com/orders/trade", headers=headers, timeout=15)
         soup = BeautifulSoup(res.text, "html.parser")
@@ -119,9 +116,9 @@ def start_bot_loop():
             m = re.search(r"/orders/([A-Z0-9]+)/", a.get("href", ""))
             if m:
                 processed_orders.add(m.group(1))
-        print(f"[✓] Успешно! Загружено {len(processed_orders)} прошлых заказов. Бот слушает новые оплаты!", flush=True)
+        print(f"[✓] Загружено {len(processed_orders)} старых заказов. Мониторинг запущен!", flush=True)
     except Exception as e:
-        print(f"[x] Ошибка при первой синхронизации: {e}", flush=True)
+        print(f"[x] Ошибка при старте: {e}", flush=True)
 
     account = Account(GOLDEN_KEY, user_agent=USER_AGENT)
 
@@ -148,16 +145,46 @@ def start_bot_loop():
                     desc_div = item.find("div", class_=re.compile(r"tc-desc"))
                     order_desc = desc_div.get_text(strip=True) if desc_div else ""
 
-                    print(f"[!] НОВЫЙ ОПЛАЧЕННЫЙ ЗАКАЗ #{order_id}: {order_desc}", flush=True)
-                    delivery_text = get_delivery_message(order_desc)
+                    print(f"\n[!] ОПЛАЧЕН НОВЫЙ ЗАКАЗ #{order_id}: {order_desc}", flush=True)
 
-                    if delivery_text == "SKIP_BUILTIN":
-                        print(f"[-] Заказ #{order_id} пропущен (встроенная выдача).", flush=True)
+                    # 1. Быстрый пропуск мобильных сенсов PUBG, где всегда молния
+                    if "чувствительность" in order_desc.lower():
+                        print(f"[-] #{order_id}: это сенса PUBG Mobile (встроенная молния ⚡). Пропуск.", flush=True)
                         processed_orders.add(order_id)
                         continue
 
+                    # 2. Глубокая проверка страницы заказа на встроенную выдачу FunPay
+                    try:
+                        order_url = f"https://funpay.com/orders/{order_id}/"
+                        order_res = session.get(order_url, headers=headers, timeout=10)
+                        order_html = order_res.text.lower()
+
+                        # Маркеры того, что FunPay сам уже выдал ключ/ссылку из поля "ТОВАРЫ"
+                        builtin_markers = [
+                            "товар передан покупателю",
+                            "выданный товар",
+                            "переданный товар",
+                            "order-secrets",
+                            "секретный текст",
+                            "автоматическая выдача"
+                        ]
+
+                        has_builtin_delivery = any(marker in order_html for marker in builtin_markers)
+                        already_has_link = any(kw in order_html for kw in ["docs.google.com", "teletype.in", "xbox-dns.ru"])
+
+                        if has_builtin_delivery or already_has_link:
+                            print(f"[⚡] #{order_id}: товар уже выдан встроенной системой FunPay! Бот не дублирует.", flush=True)
+                            processed_orders.add(order_id)
+                            continue
+
+                    except Exception as chk_err:
+                        print(f"[!] Ошибка проверки страницы #{order_id}: {chk_err}", flush=True)
+
+                    # 3. Если встроенной выдачи нет (Valorant и другие ручные разделы) — выдаёт бот
+                    delivery_text = get_delivery_message(order_desc)
+
                     if not delivery_text:
-                        print(f"[-] Для заказа #{order_id} нет триггера: {order_desc}", flush=True)
+                        print(f"[-] #{order_id}: неизвестный товар, шаблон не найден.", flush=True)
                         processed_orders.add(order_id)
                         continue
 
@@ -165,9 +192,9 @@ def start_bot_loop():
                         full_order = account.get_order(order_id)
                         account.send_message(full_order.chat_id, delivery_text)
                         processed_orders.add(order_id)
-                        print(f"[✓] Товар успешно выдан по заказу #{order_id}!", flush=True)
+                        print(f"[✓] Встроенной выдачи не было (Valorant) -> Бот успешно отправил товар в чат #{order_id}!", flush=True)
                     except Exception as send_err:
-                        print(f"[x] Ошибка отправки #{order_id}: {send_err}", flush=True)
+                        print(f"[x] Ошибка отправки сообщения #{order_id}: {send_err}", flush=True)
 
                 elif any(s in status_text for s in ["закрыт", "отменен", "возврат"]):
                     processed_orders.add(order_id)
@@ -178,7 +205,7 @@ def start_bot_loop():
         time.sleep(6)
 
 # -------------------------------------------------------------
-# АВТОПОДНЯТИЕ ЛОТОВ (КАЖДЫЕ 30 МИНУТ ПО ВСЕМ КАТЕГОРИЯМ)
+# АВТОПОДНЯТИЕ (КАЖДЫЕ 30 МИНУТ ПО ВСЕМ ЛОТАМ ИЗ ПРОФИЛЯ)
 # -------------------------------------------------------------
 def start_auto_raise():
     time.sleep(10)
@@ -191,7 +218,7 @@ def start_auto_raise():
 
     while True:
         try:
-            print("[↑] Проверка всех категорий для поднятия...", flush=True)
+            print("[↑] Проверка всех категорий профиля для автоподнятия...", flush=True)
             prof_res = session.get(f"https://funpay.com/users/{USER_ID}/", headers={"User-Agent": USER_AGENT})
             categories = set(re.findall(r"/(lots|chips)/(\d+)/", prof_res.text))
 
@@ -230,16 +257,16 @@ def start_auto_raise():
                             if g_id:
                                 raised_games.add(g_id)
 
-                    msg = res_json.get("msg", "Запрос обработан")
+                    msg = res_json.get("msg", "Обработано")
                     print(f"[↑] {cat_type} #{node}: {msg}", flush=True)
 
                 except Exception as node_err:
-                    print(f"[x] Ошибка категории #{node}: {node_err}", flush=True)
+                    print(f"[x] Ошибка поднятия #{node}: {node_err}", flush=True)
 
                 time.sleep(3)
 
         except Exception as e:
-            print(f"[x] Ошибка автоподнятия: {e}", flush=True)
+            print(f"[x] Ошибка цикла поднятия: {e}", flush=True)
 
         time.sleep(1800)
 
