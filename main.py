@@ -1,15 +1,11 @@
 import os
 import re
-import html
-import json
 import time
 import threading
 import requests
 from bs4 import BeautifulSoup
 from flask import Flask
 from FunPayAPI.account import Account
-from FunPayAPI.updater.runner import Runner
-from FunPayAPI.updater.events import NewOrderEvent
 
 app = Flask(__name__)
 
@@ -18,7 +14,7 @@ def index():
     return "FunPay Auto-Delivery & Auto-Raise Bot is active 24/7!"
 
 # -------------------------------------------------------------
-# НАСТРОЙКИ АККАУНТА И ШАБЛОНЫ
+# НАСТРОЙКИ АККАУНТА И ШАБЛОНЫ ВЫДАЧИ
 # -------------------------------------------------------------
 GOLDEN_KEY = "t1j669ik62280q9ubjuellcf7wzye7ca"
 USER_ID    = "18024937"
@@ -88,16 +84,85 @@ def get_delivery_message(description: str):
 
     return None
 
-def get_csrf_token():
+# -------------------------------------------------------------
+# НАДЕЖНАЯ АВТОВЫДАЧА (ПРЯМОЙ ОПРОС РАЗДЕЛА ПРОДАЖ)
+# -------------------------------------------------------------
+def start_bot_loop():
+    time.sleep(5)
+    session = requests.Session()
+    session.cookies.set("golden_key", GOLDEN_KEY)
+    headers = {
+        "User-Agent": USER_AGENT,
+        "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7"
+    }
+
+    # Шаг 1. Загрузка существующих заказов, чтобы не трогать старых покупателей
+    print("[+] Подключение к FunPay (Автовыдача)...", flush=True)
     try:
-        r = requests.get("https://funpay.com/", headers={"User-Agent": USER_AGENT}, cookies={"golden_key": GOLDEN_KEY}, timeout=10)
-        m = re.search(r'data-app-data="([^"]+)"', r.text)
-        if m:
-            data = json.loads(html.unescape(m.group(1)))
-            return data.get("csrfToken") or data.get("csrf-token")
-    except Exception:
-        pass
-    return None
+        res = session.get("https://funpay.com/orders/trade", headers=headers, timeout=15)
+        soup = BeautifulSoup(res.text, "html.parser")
+        for a in soup.find_all("a", href=re.compile(r"/orders/[A-Z0-9]+/")):
+            m = re.search(r"/orders/([A-Z0-9]+)/", a.get("href", ""))
+            if m:
+                processed_orders.add(m.group(1))
+        print(f"[✓] Успешно! Загружено {len(processed_orders)} прошлых заказов. Бот слушает новые оплаты!", flush=True)
+    except Exception as e:
+        print(f"[x] Ошибка при первой синхронизации заказов: {e}", flush=True)
+
+    account = Account(GOLDEN_KEY, user_agent=USER_AGENT)
+
+    # Шаг 2. Непрерывный опрос новых оплаченных заказов каждые 6 секунд
+    while True:
+        try:
+            res = session.get("https://funpay.com/orders/trade", headers=headers, timeout=15)
+            soup = BeautifulSoup(res.text, "html.parser")
+            order_items = soup.find_all("a", class_=re.compile(r"tc-item"))
+
+            for item in order_items:
+                href = item.get("href", "")
+                m = re.search(r"/orders/([A-Z0-9]+)/", href)
+                if not m:
+                    continue
+                order_id = m.group(1)
+
+                if order_id in processed_orders:
+                    continue
+
+                status_div = item.find("div", class_=re.compile(r"tc-status"))
+                status_text = status_div.get_text(strip=True).lower() if status_div else ""
+
+                if "оплачен" in status_text:
+                    desc_div = item.find("div", class_=re.compile(r"tc-desc"))
+                    order_desc = desc_div.get_text(strip=True) if desc_div else ""
+
+                    print(f"[!] НОВЫЙ ОПЛАЧЕННЫЙ ЗАКАЗ #{order_id}: {order_desc}", flush=True)
+                    delivery_text = get_delivery_message(order_desc)
+
+                    if delivery_text == "SKIP_BUILTIN":
+                        print(f"[-] Заказ #{order_id} пропущен (встроенная автовыдача FunPay).", flush=True)
+                        processed_orders.add(order_id)
+                        continue
+
+                    if not delivery_text:
+                        print(f"[-] Для заказа #{order_id} нет подходящего триггера: {order_desc}", flush=True)
+                        processed_orders.add(order_id)
+                        continue
+
+                    try:
+                        full_order = account.get_order(order_id)
+                        account.send_message(full_order.chat_id, delivery_text)
+                        processed_orders.add(order_id)
+                        print(f"[✓] Товар успешно отправлен в чат по заказу #{order_id}!", flush=True)
+                    except Exception as send_err:
+                        print(f"[x] Ошибка отправки сообщения #{order_id}: {send_err}", flush=True)
+
+                elif any(s in status_text for s in ["закрыт", "отменен", "возврат"]):
+                    processed_orders.add(order_id)
+
+        except Exception:
+            pass
+
+        time.sleep(6)
 
 # -------------------------------------------------------------
 # АВТОПОДНЯТИЕ ЛОТОВ (КАЖДЫЕ 30 МИНУТ)
@@ -163,58 +228,7 @@ def start_auto_raise():
         except Exception as e:
             print(f"[x] Ошибка в цикле автоподнятия: {e}", flush=True)
 
-        # Пауза 30 минут (1800 секунд)
         time.sleep(1800)
-
-# -------------------------------------------------------------
-# АВТОВЫДАЧА ТОВАРОВ
-# -------------------------------------------------------------
-def start_bot_loop():
-    while True:
-        try:
-            print("[+] Подключение к FunPay (Автовыдача)...", flush=True)
-            account = Account(GOLDEN_KEY, user_agent=USER_AGENT).get()
-            
-            csrf = get_csrf_token()
-            if csrf:
-                account.csrf_token = csrf
-
-            print(f"[✓] Успешно! Бот слушает заказы на аккаунте: {account.username}", flush=True)
-
-            runner = Runner(account)
-
-            for event in runner.listen(requests_delay=4):
-                if isinstance(event, NewOrderEvent):
-                    order_shortcut = event.order
-                    order_id = order_shortcut.id
-                    order_desc = order_shortcut.description or ""
-
-                    if order_id in processed_orders:
-                        continue
-
-                    print(f"[!] Новый заказ #{order_id}: {order_desc}", flush=True)
-                    delivery_text = get_delivery_message(order_desc)
-
-                    if delivery_text == "SKIP_BUILTIN":
-                        print(f"[-] Заказ #{order_id} пропущен (встроенная автовыдача).", flush=True)
-                        processed_orders.add(order_id)
-                        continue
-
-                    if not delivery_text:
-                        print(f"[-] Для заказа #{order_id} нет триггера: {order_desc}", flush=True)
-                        continue
-
-                    try:
-                        full_order = account.get_order(order_id)
-                        account.send_message(full_order.chat_id, delivery_text)
-                        processed_orders.add(order_id)
-                        print(f"[✓] Успешно выдан товар по заказу #{order_id}!", flush=True)
-                    except Exception as send_err:
-                        print(f"[x] Ошибка отправки #{order_id}: {send_err}", flush=True)
-
-        except Exception as err:
-            print(f"[x] Сбой автовыдачи: {err}. Перезапуск через 15 сек...", flush=True)
-            time.sleep(15)
 
 if __name__ == '__main__':
     threading.Thread(target=start_bot_loop, daemon=True).start()
