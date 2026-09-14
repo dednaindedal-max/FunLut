@@ -20,6 +20,7 @@ def index():
 # -------------------------------------------------------------
 GOLDEN_KEY = "t1j669ik62280q9ubjuellcf7wzye7ca"
 USER_ID    = "18024937"
+USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 
 TRIGGER_SIGMA  = "СИГМЫ"
 TRIGGER_ZIKO   = "RTxZIKO"
@@ -86,29 +87,28 @@ def get_delivery_message(description: str):
     return None
 
 # -------------------------------------------------------------
-# АВТОПОДНЯТИЕ ЛОТОВ (С ПРЕДВАРИТЕЛЬНЫМ ПОИСКОМ GAME_ID)
+# АВТОПОДНЯТИЕ ЛОТОВ
 # -------------------------------------------------------------
 def start_auto_raise():
     time.sleep(10)
     session = requests.Session()
     session.cookies.set("golden_key", GOLDEN_KEY)
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "User-Agent": USER_AGENT,
         "X-Requested-With": "XMLHttpRequest"
     }
 
     while True:
         try:
             print("[↑] Проверка лотов для поднятия...", flush=True)
-            prof_res = session.get(f"https://funpay.com/users/{USER_ID}/", headers={"User-Agent": headers["User-Agent"]})
+            prof_res = session.get(f"https://funpay.com/users/{USER_ID}/", headers={"User-Agent": USER_AGENT})
             categories = set(re.findall(r"/(lots|chips)/(\d+)/", prof_res.text))
 
             raised_games = set()
 
             for cat_type, node in categories:
                 try:
-                    # 1. Заходим на страницу категории и берем точный data-game
-                    cat_page = session.get(f"https://funpay.com/{cat_type}/{node}/", headers={"User-Agent": headers["User-Agent"]}).text
+                    cat_page = session.get(f"https://funpay.com/{cat_type}/{node}/", headers={"User-Agent": USER_AGENT}).text
                     game_m = re.search(r'data-game="(\d+)"', cat_page)
                     
                     payload = {"node_id": node}
@@ -118,11 +118,9 @@ def start_auto_raise():
                             continue
                         payload["game_id"] = game_id
 
-                    # 2. Отправляем запрос на открытие окна поднятия
                     r1 = session.post(f"https://funpay.com/{cat_type}/raise", data=payload, headers=headers)
                     res_json = r1.json()
 
-                    # 3. Если есть модальное окно (Metro Royale, Прочее) — подтверждаем чекбоксы
                     if "modal" in res_json:
                         soup = BeautifulSoup(res_json["modal"], "html.parser")
                         raise_box = soup.find("div", class_="raise-box")
@@ -152,6 +150,7 @@ def start_auto_raise():
         except Exception as e:
             print(f"[x] Ошибка автоподнятия: {e}", flush=True)
 
+        # Проверка раз в 1 час
         time.sleep(3600)
 
 # -------------------------------------------------------------
@@ -161,12 +160,13 @@ def start_bot_loop():
     while True:
         try:
             print("[+] Подключение к FunPay (Автовыдача)...", flush=True)
-            account = Account(GOLDEN_KEY).get()
+            account = Account(GOLDEN_KEY, user_agent=USER_AGENT).get()
             print(f"[✓] Успешно! Бот слушает заказы на аккаунте: {account.username}", flush=True)
 
             runner = Runner(account)
 
-            for event in runner.listen():
+            # requests_delay=4 дает задержку в 4 секунды между проверками (защита от спама и ошибок)
+            for event in runner.listen(requests_delay=4):
                 if isinstance(event, NewOrderEvent):
                     order_shortcut = event.order
                     order_id = order_shortcut.id
